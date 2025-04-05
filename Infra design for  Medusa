@@ -1,0 +1,136 @@
+medusa-deployment/
+│
+├── .github/
+│   └── workflows/
+│       └── deploy-medusa.yml         # GitHub Actions workflow
+│
+├── terraform/
+│   ├── main.tf                       # Terraform infra setup
+│   ├── variables.tf                  # Optional: Variables
+│   └── outputs.tf                    # Optional: Outputs
+│
+├── medusa/                           # Your MedusaJS project (optional)
+│   └── ...                           # Medusa codebase if not using remote Git
+│
+└── README.md
+
+
+
+
+terraform/main.tf
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_key_pair" "deployer" {
+  key_name   = "medusa-key"
+  public_key = file("~/.ssh/id_rsa.pub")
+}
+
+resource "aws_security_group" "medusa_sg" {
+  name        = "medusa-sg"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 9000
+    to_port     = 9000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_instance" "medusa_ec2" {
+  ami                    = "ami-0c02fb55956c7d316"
+  instance_type          = "t2.micro"
+  key_name               = aws_key_pair.deployer.key_name
+  vpc_security_group_ids = [aws_security_group.medusa_sg.id]
+
+  tags = {
+    Name = "medusa-server"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum update -y",
+      "curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -",
+      "sudo yum install -y nodejs git",
+      "sudo npm install -g yarn pm2"
+    ]
+
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = file("~/.ssh/id_rsa")
+      host        = self.public_ip
+    }
+  }
+}
+
+output "instance_ip" {
+  value = aws_instance.medusa_ec2.public_ip
+}
+
+
+
+.github/workflows/deploy-medusa.yml
+
+name: Deploy MedusaJS to EC2
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      - name: Deploy MedusaJS
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} << 'EOF'
+            # Clone repo or pull updates
+            if [ ! -d "medusajs" ]; then
+              git clone https://github.com/YOUR_GITHUB_USERNAME/YOUR_MEDUSA_REPO.git medusajs
+            fi
+
+            cd medusajs
+            git pull origin main
+            yarn install
+            yarn build
+
+            # Start Medusa using pm2
+            pm2 delete medusa || true
+            pm2 start "yarn medusa-dev" --name medusa
+            pm2 save
+          EOF
+
+
+
+GitHub Secrets Required
+In your GitHub repo → Settings → Secrets and variables → Actions, add:
+
+Secret Name	Value
+EC2_SSH_PRIVATE_KEY	Content of your private SSH key
+EC2_HOST	Public IP of the EC2 instance (from output)
